@@ -9,6 +9,8 @@
 
 constexpr int WINDOW_W = 960;
 constexpr int WINDOW_H = 540;
+constexpr int WORLD_W = 1920;  
+constexpr int WORLD_H = 1080;
 constexpr float PLAYER_SPEED = 240.f;
 constexpr float BULLET_SPEED = 750.f;
 constexpr float FIRE_DELAY = 0.10f;
@@ -32,6 +34,18 @@ void saveHighScore(int s) {
     std::ofstream f("assets/highscore.txt");
     if (f) f << s;
 }
+
+// -------------------- BACKGROUND --------------------
+struct Star {
+    sf::CircleShape shape;
+    Star(float x, float y, float r, sf::Color color) {
+        shape.setRadius(r);
+        shape.setOrigin({r, r});
+        shape.setPosition({x, y});
+        shape.setFillColor(color);
+    }
+};
+
 
 // -------------------- GLOW --------------------
 struct Glow {
@@ -76,7 +90,10 @@ struct Bullet {
             else ++it;
         }
         sf::Vector2f p = s.getPosition();
-        return life > 0 && p.x > -12 && p.x < WINDOW_W + 12 && p.y > -12 && p.y < WINDOW_H + 12;
+        return life > 0 &&
+            p.x > -12 && p.x < WORLD_W + 12 &&
+            p.y > -12 && p.y < WORLD_H + 12;
+
     }
 };
 
@@ -130,8 +147,10 @@ struct ChainEnemy {
 
 // -------------------- MAIN --------------------
 int main() {
-    sf::RenderWindow window(sf::VideoMode({(unsigned)WINDOW_W, (unsigned)WINDOW_H}),
-                            "Yawnoc — SFML 3.0 Final", sf::State::Windowed);
+    sf::RenderWindow window(sf::VideoMode({(unsigned)WINDOW_W, (unsigned)WINDOW_H}), "Yawnoc - SFML 3.0 Final");
+
+
+
     window.setFramerateLimit(60);
 
     sf::View view(sf::FloatRect({0.f, 0.f}, {(float)WINDOW_W, (float)WINDOW_H}));
@@ -145,12 +164,26 @@ int main() {
     int nextWaveScore = 100;
     float shootTimer = 0.f, enemyTimer = 0.f, enemySpawnRate = 1.6f;
     float shakeTimer = 0.f, shakeIntensity = 0.f;
+float damageFlash = 0.f;  // time left for red border flash
+
 
     sf::Clock clock;
     sf::CircleShape player(10.f);
     player.setOrigin({10.f, 10.f});
     player.setFillColor(sf::Color(120, 255, 140));
     player.setPosition({WINDOW_W / 2.f, WINDOW_H / 2.f});
+
+// Generate background stars
+std::vector<Star> stars;
+const int STAR_COUNT = 400;  // increase for denser background
+for (int i = 0; i < STAR_COUNT; ++i) {
+    float x = randf(0, WORLD_W);
+    float y = randf(0, WORLD_H);
+    float r = randf(0.5f, 1.5f);
+    sf::Color c(255, 255, 255, rand() % 120 + 80); // faint white dots
+    stars.emplace_back(x, y, r, c);
+}
+
 
     std::vector<Bullet> bullets;
     std::vector<ChainEnemy> enemies;
@@ -161,6 +194,7 @@ int main() {
 
     sf::RectangleShape hpBar({200.f, 16.f});
     hpBar.setPosition(sf::Vector2f{(float)WINDOW_W - 220.f, 10.f});
+
     hpBar.setFillColor(sf::Color::Green);
 
     sf::Text title(font, "YAWNOC", 76);
@@ -241,8 +275,8 @@ int main() {
             // Clamp player inside screen
             sf::Vector2f pos = player.getPosition();
             float rP = player.getRadius();
-            pos.x = std::clamp(pos.x, rP, (float)WINDOW_W - rP);
-            pos.y = std::clamp(pos.y, rP, (float)WINDOW_H - rP);
+            pos.x = std::clamp(pos.x, rP, (float)WORLD_W - rP);
+            pos.y = std::clamp(pos.y, rP, (float)WORLD_H - rP);
             player.setPosition(pos);
 
             sf::Vector2f aim = window.mapPixelToCoords(sf::Mouse::getPosition(window)) - player.getPosition();
@@ -279,6 +313,7 @@ int main() {
                     killed = true;
                     shakeTimer = 0.4f;
                     shakeIntensity = 12.f;
+		    damageFlash = 0.4f; // trigger red border flash
                 }
                 if (killed) eit = enemies.erase(eit);
                 else ++eit;
@@ -299,15 +334,24 @@ int main() {
                 continue;
             }
 
-            // Camera shake
-            if (shakeTimer > 0.f) {
-                float sx = randf(-1, 1) * shakeIntensity;
-                float sy = randf(-1, 1) * shakeIntensity;
-                view.setCenter(sf::Vector2f{WINDOW_W / 2.f + sx, WINDOW_H / 2.f + sy});
-            } else {
-                view.setCenter(sf::Vector2f{WINDOW_W / 2.f, WINDOW_H / 2.f});
-            }
-            window.setView(view);
+// Camera follow + shake
+static sf::Vector2f camCenter = player.getPosition();
+camCenter += (player.getPosition() - camCenter) * 5.f * dt;  // smooth follow
+
+// apply shake if active
+if (shakeTimer > 0.f) {
+    float sx = randf(-1, 1) * shakeIntensity;
+    float sy = randf(-1, 1) * shakeIntensity;
+    camCenter += sf::Vector2f(sx, sy);
+}
+
+// clamp camera so it doesn’t show outside the world edges
+camCenter.x = std::clamp(camCenter.x, WINDOW_W / 2.f, WORLD_W - WINDOW_W / 2.f);
+camCenter.y = std::clamp(camCenter.y, WINDOW_H / 2.f, WORLD_H - WINDOW_H / 2.f);
+
+view.setCenter(camCenter);
+window.setView(view);
+
 
             // Update UI
             float hpRatio = std::max(0.f, (float)health / MAX_HEALTH);
@@ -322,17 +366,29 @@ int main() {
 
             // Draw
             window.clear();
+
+            // --- Draw world background stars using world coordinates ---
+            window.setView(window.getDefaultView()); // fix stars to screen, not moving with player
+            for (auto &s : stars) window.draw(s.shape);
+            window.setView(view); // restore camera view for player + enemies
+
+            // --- Draw world objects ---
             for (auto& e : enemies) e.draw(window);
             for (auto& b : bullets) {
-                for (auto& g : b.trail) window.draw(g.shape, sf::RenderStates(sf::BlendAdd));
+                for (auto& g : b.trail)
+                    window.draw(g.shape, sf::RenderStates(sf::BlendAdd));
                 window.draw(b.s);
             }
             window.draw(player);
+
+            // --- Draw UI --- (switch to default view so it stays fixed on screen)
+            window.setView(window.getDefaultView());  
             window.draw(hpBack);
             window.draw(hpBar);
             window.draw(scoreText);
             window.draw(hsText);
             window.draw(waveText);
+
         } else if (state == GameState::MENU) {
             window.clear(sf::Color(20, 20, 40));
             window.draw(title);
@@ -341,6 +397,23 @@ int main() {
             hsText.setString("High: " + std::to_string(highScore));
             window.draw(hsText);
         }
+
+        // --- Damage flash overlay ---
+        if (damageFlash > 0.f) {
+            damageFlash -= dt;
+            float alpha = std::min(255.f, 255.f * (damageFlash / 0.4f)); // fade out
+            sf::RectangleShape flash(sf::Vector2f(WINDOW_W, WINDOW_H));
+
+            flash.setFillColor(sf::Color(255, 0, 0, static_cast<uint8_t>(alpha * 0.3f)));
+            flash.setOutlineColor(sf::Color(255, 0, 0, static_cast<uint8_t>(alpha)));
+
+            flash.setOutlineThickness(20.f);
+
+            window.setView(window.getDefaultView());
+            window.draw(flash);
+            window.setView(view);
+        }
+
 
         window.display();
     }
